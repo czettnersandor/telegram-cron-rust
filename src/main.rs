@@ -358,7 +358,7 @@ fn main() {
         match inotify.read_events_blocking(&mut buf) {
             Ok(_)  => info!("Config changed (inotify), reloading…"),
             Err(e) => error!("inotify read error: {}", e),
-        }q
+        }
 
         // Signal the scheduler to stop, then wait for it to exit cleanly.
         *stop.lock().unwrap() = true;
