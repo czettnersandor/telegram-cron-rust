@@ -1,0 +1,32 @@
+[Unit]
+Description=Cron Notifier — scheduled script runner with Telegram notifications
+Documentation=https://github.com/yourname/telegram-cron
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# The binary path after `cargo install` or manual copy to ~/.local/bin/
+ExecStart=%h/.local/bin/telegram-cron %h/.config/telegram-cron/config.yaml
+
+# Restart automatically on crash (but not on clean exit)
+Restart=on-failure
+RestartSec=10s
+
+# Give the process time to finish in-flight jobs on shutdown
+TimeoutStopSec=30
+
+# Logging goes to the systemd journal; view with:
+#   journalctl --user -u telegram-cron -f
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=telegram-cron
+
+# Environment
+Environment=RUST_LOG=info
+# Uncomment to increase verbosity:
+# Environment=RUST_LOG=debug
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,62 @@
+# telegram-cron configuration
+# Place this file at: ~/.config/telegram-cron/config.yaml
+# Or pass the path as the first argument: telegram-cron /path/to/config.yaml
+
+telegram:
+  bot_token: "123456789:AABBCCDDEEFFaabbccddeeff-1234567890"
+  chat_id: "987654321"
+
+# Optional: base directory for scripts (relative to this config file if not absolute)
+# scripts_dir: "scripts"
+
+jobs:
+  health_check:
+    schedule: "*/5 * * * *"   # Every 5 minutes
+    script: "scripts/health_check.sh"
+    timeout: 30
+    enabled: true
+
+  weather_amsterdam:
+    schedule: "0 8 * * *"     # Every day at 08:00
+    script: "scripts/weather.py"
+    timeout: 15
+    enabled: true
+    args:
+      - "--lat"
+      - "52.3676"
+      - "--lon"
+      - "4.9041"
+      - "--city"
+      - "Amsterdam"
+
+  weather_london:
+    schedule: "0 8 * * *"     # Every day at 08:00
+    script: "scripts/weather.py"
+    timeout: 15
+    enabled: false             # Disabled example
+    args:
+      - "--lat"
+      - "51.5074"
+      - "--lon"
+      - "-0.1278"
+      - "--city"
+      - "London"
+
+  disk_usage:
+    schedule: "0 */6 * * *"   # Every 6 hours
+    script: "scripts/disk_usage.sh"
+    timeout: 10
+    enabled: true
+    args:
+      - "/"
+      - "80"                   # Alert threshold in %
+
+  ssl_expiry:
+    schedule: "0 9 * * 1"     # Every Monday at 09:00
+    script: "scripts/ssl_check.sh"
+    timeout: 30
+    enabled: true
+    args:
+      - "example.com"
+    env:
+      ALERT_DAYS: "14"         # Warn if cert expires within 14 days

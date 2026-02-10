@@ -1,0 +1,370 @@
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
+
+use chrono::{Local, Utc};
+use cron::Schedule;
+use inotify::{Inotify, WatchMask};
+use log::{error, info, warn};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use std::str::FromStr;
+
+// ─── Config structures ────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct TelegramConfig {
+    bot_token: String,
+    chat_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct JobConfig {
+    schedule: String,
+    script: String,
+    #[serde(default = "default_timeout")]
+    timeout: u64,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    /// CLI arguments forwarded to the script verbatim.
+    #[serde(default)]
+    args: Vec<String>,
+    /// Extra environment variables injected into the script process.
+    #[serde(default)]
+    env: HashMap<String, String>,
+}
+
+fn default_timeout() -> u64 { 60 }
+fn default_true() -> bool { true }
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct AppConfig {
+    telegram: TelegramConfig,
+    /// Base directory for scripts.  Relative paths are resolved from the
+    /// config file's parent directory.  Defaults to that same parent.
+    #[serde(default)]
+    scripts_dir: Option<String>,
+    jobs: HashMap<String, JobConfig>,
+}
+
+// ─── Telegram sender ──────────────────────────────────────────────────────────
+
+fn send_telegram(token: &str, chat_id: &str, message: &str) -> Result<(), String> {
+    let url = format!("https://api.telegram.org/bot{}/sendMessage", token);
+    let body = json!({
+        "chat_id": chat_id,
+        "text": message,
+        "parse_mode": "HTML"
+    });
+
+    let response = ureq::post(&url)
+        .set("Content-Type", "application/json")
+        .send_string(&body.to_string())
+        .map_err(|e| format!("HTTP error: {}", e))?;
+
+    if response.status() != 200 {
+        return Err(format!("Telegram API returned status {}", response.status()));
+    }
+    Ok(())
+}
+
+// ─── Job runner ───────────────────────────────────────────────────────────────
+
+fn run_job(
+    job_name: &str,
+    job: &JobConfig,
+    scripts_base: &Path,
+    telegram: &TelegramConfig,
+) {
+    info!("[{}] Running", job_name);
+
+    let script_path = if Path::new(&job.script).is_absolute() {
+        PathBuf::from(&job.script)
+    } else {
+        scripts_base.join(&job.script)
+    };
+
+    if !script_path.exists() {
+        let msg = format!(
+            "⚠️ <b>telegram-cron</b>\nJob: <code>{}</code>\nScript not found: <code>{}</code>",
+            job_name,
+            script_path.display()
+        );
+        error!("[{}] Script not found: {}", job_name, script_path.display());
+        notify(telegram, job_name, &msg);
+        return;
+    }
+
+    let mut cmd = Command::new(&script_path);
+    cmd.args(&job.args);
+    for (k, v) in &job.env {
+        cmd.env(k, v);
+    }
+
+    match cmd.output() {
+        Err(e) => {
+            let msg = format!(
+                "⚠️ <b>telegram-cron</b>\nJob: <code>{}</code>\nFailed to spawn: {}",
+                job_name, e
+            );
+            error!("[{}] Failed to spawn: {}", job_name, e);
+            notify(telegram, job_name, &msg);
+        }
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+
+            if !output.status.success() {
+                let detail = if !stderr.is_empty() {
+                    format!("Stderr:\n<pre>{}</pre>", truncate(&stderr, 3000))
+                } else if !stdout.is_empty() {
+                    format!("Stdout:\n<pre>{}</pre>", truncate(&stdout, 3000))
+                } else {
+                    "(no output)".to_string()
+                };
+                let msg = format!(
+                    "❌ <b>telegram-cron</b>\nJob: <code>{}</code>\nExit code: {}\n{}",
+                    job_name,
+                    output.status.code().unwrap_or(-1),
+                    detail
+                );
+                error!("[{}] Script failed (exit {:?})", job_name, output.status.code());
+                notify(telegram, job_name, &msg);
+                return;
+            }
+
+            match stdout.as_str() {
+                "NOUPDATE" => {
+                    info!("[{}] NOUPDATE — no notification sent", job_name);
+                }
+                "" => {
+                    info!("[{}] Empty output — no notification sent", job_name);
+                }
+                text => {
+                    info!("[{}] Sending: {}", job_name, truncate(text, 80));
+                    let msg = format!("🔔 <b>{}</b>\n{}", job_name, truncate(text, 4000));
+                    notify(telegram, job_name, &msg);
+                }
+            }
+        }
+    }
+}
+
+/// Send a Telegram message, logging any error without panicking.
+fn notify(telegram: &TelegramConfig, job_name: &str, msg: &str) {
+    if let Err(e) = send_telegram(&telegram.bot_token, &telegram.chat_id, msg) {
+        error!("[{}] Telegram send failed: {}", job_name, e);
+    }
+}
+
+fn truncate(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        s.to_string()
+    } else {
+        let t: String = s.chars().take(max_chars).collect();
+        format!("{}…", t)
+    }
+}
+
+// ─── Config loader ────────────────────────────────────────────────────────────
+
+fn load_config(path: &Path) -> Result<AppConfig, String> {
+    let content = fs::read_to_string(path)
+        .map_err(|e| format!("Cannot read {}: {}", path.display(), e))?;
+    serde_yaml::from_str(&content)
+        .map_err(|e| format!("Cannot parse {}: {}", path.display(), e))
+}
+
+fn get_scripts_base(config: &AppConfig, config_path: &Path) -> PathBuf {
+    if let Some(dir) = &config.scripts_dir {
+        let p = PathBuf::from(dir);
+        if p.is_absolute() {
+            return p;
+        }
+        if let Some(parent) = config_path.parent() {
+            return parent.join(&p);
+        }
+        return p;
+    }
+    config_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+// ─── Scheduler ────────────────────────────────────────────────────────────────
+
+struct JobState {
+    last_fired: Option<chrono::DateTime<Utc>>,
+}
+
+/// Returns true when there is at least one scheduled occurrence in the
+/// half-open interval `(window_start, now]`.
+/// On the very first tick (no previous fire) we look back one minute so
+/// startup doesn't skip an immediately-due job.
+fn should_fire(
+    schedule: &Schedule,
+    last_fired: Option<chrono::DateTime<Utc>>,
+    now: chrono::DateTime<Utc>,
+) -> bool {
+    let window_start = last_fired
+        .unwrap_or_else(|| now - chrono::Duration::minutes(1));
+
+    for t in schedule.after(&window_start) {
+        return t <= now;
+    }
+    false
+}
+
+fn run_scheduler(
+    config: AppConfig,
+    scripts_base: PathBuf,
+    stop: Arc<Mutex<bool>>,
+) {
+    let mut job_states: HashMap<String, JobState> = config
+        .jobs
+        .keys()
+        .map(|name| (name.clone(), JobState { last_fired: None }))
+        .collect();
+
+    let config = Arc::new(config);
+    info!("Scheduler started with {} job(s)", config.jobs.len());
+
+    loop {
+        // Honour stop signal (set by the watcher on config change).
+        if *stop.lock().unwrap() {
+            info!("Scheduler stopping — config reload requested");
+            return;
+        }
+
+        let now = Utc::now();
+        info!("Tick at {}", Local::now().format("%Y-%m-%d %H:%M:%S %Z"));
+
+        for (name, job) in &config.jobs {
+            if !job.enabled {
+                continue;
+            }
+
+            let schedule = match Schedule::from_str(&job.schedule) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!("[{}] Invalid cron '{}': {}", name, job.schedule, e);
+                    continue;
+                }
+            };
+
+            let state = job_states
+                .entry(name.clone())
+                .or_insert(JobState { last_fired: None });
+
+            if should_fire(&schedule, state.last_fired, now) {
+                state.last_fired = Some(now);
+
+                let job_c  = job.clone();
+                let name_c = name.clone();
+                let base_c = scripts_base.clone();
+                let tg_c   = config.telegram.clone();
+
+                thread::spawn(move || run_job(&name_c, &job_c, &base_c, &tg_c));
+            }
+        }
+
+        thread::sleep(Duration::from_secs(5));
+    }
+}
+
+// ─── Entry point ─────────────────────────────────────────────────────────────
+
+fn main() {
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("info"),
+    )
+    .init();
+
+    // Config path: first CLI arg, or the XDG default.
+    let config_path: PathBuf = if let Some(arg) = std::env::args().nth(1) {
+        PathBuf::from(arg)
+    } else {
+        let base = std::env::var("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                PathBuf::from(std::env::var("HOME").expect("HOME not set")).join(".config")
+            });
+        base.join("telegram-cron").join("config.yaml")
+    };
+
+    info!("Config: {}", config_path.display());
+
+    loop {
+        // ── Load config ───────────────────────────────────────────────────────
+        let config = match load_config(&config_path) {
+            Ok(c) => c,
+            Err(e) => {
+                error!("Config error: {}", e);
+                info!("Retrying in 10 s…");
+                thread::sleep(Duration::from_secs(10));
+                continue;
+            }
+        };
+
+        let scripts_base = get_scripts_base(&config, &config_path);
+        info!("Scripts base: {}", scripts_base.display());
+
+        // ── Start scheduler thread ────────────────────────────────────────────
+        let stop         = Arc::new(Mutex::new(false));
+        let stop_sched   = Arc::clone(&stop);
+        let config_clone = config.clone();
+        let base_clone   = scripts_base.clone();
+
+        let sched_thread = thread::spawn(move || {
+            run_scheduler(config_clone, base_clone, stop_sched);
+        });
+
+        // ── Watch config file with inotify ────────────────────────────────────
+        //
+        // We re-create the Inotify instance every loop iteration because after
+        // a MOVED_TO event (editor atomic-rename) the original inode is gone;
+        // the watch would silently stop working if we reused it.
+        //
+        // WatchMask flags:
+        //   CLOSE_WRITE  – file was written and closed in-place (e.g. echo > file)
+        //   MOVED_TO     – a temp file was renamed onto our path (vim, nano, etc.)
+        let mut inotify = Inotify::init()
+            .expect("Failed to initialise inotify — are you on Linux?");
+
+        // The watch must be added after the file exists; if it doesn't yet,
+        // fall back to a short sleep-and-retry so we don't crash on startup.
+        loop {
+            match inotify.watches().add(
+                &config_path,
+                WatchMask::CLOSE_WRITE | WatchMask::MOVED_TO,
+            ) {
+                Ok(_)  => break,
+                Err(e) => {
+                    error!("inotify watch failed ({}), retrying in 2 s…", e);
+                    thread::sleep(Duration::from_secs(2));
+                }
+            }
+        }
+
+        info!("Watching {} for changes (inotify)", config_path.display());
+
+        // Block here — zero CPU — until the kernel delivers an event.
+        let mut buf = [0u8; 1024];
+        match inotify.read_events_blocking(&mut buf) {
+            Ok(_)  => info!("Config changed (inotify), reloading…"),
+            Err(e) => error!("inotify read error: {}", e),
+        }q
+
+        // Signal the scheduler to stop, then wait for it to exit cleanly.
+        *stop.lock().unwrap() = true;
+        if let Err(e) = sched_thread.join() {
+            error!("Scheduler thread panicked: {:?}", e);
+        }
+        info!("Scheduler restarting with new config…");
+    }
+}
