@@ -16,18 +16,18 @@ jobs:
     timeout: 30
     enabled: true
 
-  weather_amsterdam:
+  weather_home:
     schedule: "0 8 * * *"     # Every day at 08:00
     script: "scripts/weather.py"
     timeout: 15
     enabled: true
     args:
       - "--lat"
-      - "52.3676"
+      - "46.5333312"
       - "--lon"
-      - "4.9041"
+      - "19.8666632"
       - "--city"
-      - "Amsterdam"
+      - "Budapest"
 
   weather_london:
     schedule: "0 8 * * *"     # Every day at 08:00
