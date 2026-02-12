@@ -72,6 +72,211 @@ fn send_telegram(token: &str, chat_id: &str, message: &str) -> Result<(), String
     Ok(())
 }
 
+// ─── Telegram bot commands ────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct TelegramUpdate {
+    update_id: i64,
+    message: Option<TelegramMessage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TelegramMessage {
+    chat: TelegramChat,
+    text: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TelegramChat {
+    id: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct TelegramResponse {
+    ok: bool,
+    result: Option<serde_json::Value>,
+}
+
+/// Clear all bot commands using Telegram's deleteMyCommands API
+fn clear_bot_commands(token: &str) -> Result<(), String> {
+    let url = format!("https://api.telegram.org/bot{}/deleteMyCommands", token);
+    
+    let response = ureq::post(&url)
+        .set("Content-Type", "application/json")
+        .send_string("{}")
+        .map_err(|e| format!("HTTP error: {}", e))?;
+
+    if response.status() != 200 {
+        return Err(format!("Telegram API returned status {}", response.status()));
+    }
+    
+    info!("Bot commands cleared");
+    Ok(())
+}
+
+/// Set bot commands using Telegram's setMyCommands API
+/// This registers commands for autocomplete in Telegram clients
+fn set_bot_commands(token: &str, job_names: &[String]) -> Result<(), String> {
+    let url = format!("https://api.telegram.org/bot{}/setMyCommands", token);
+    
+    // Build description with available job names
+    let job_list = if job_names.is_empty() {
+        "no jobs configured".to_string()
+    } else {
+        job_names.join(", ")
+    };
+    
+    let commands = vec![
+        json!({
+            "command": "run",
+            "description": format!("Run a job: {}", job_list)
+        }),
+    ];
+    
+    let body = json!({
+        "commands": commands
+    });
+
+    let response = ureq::post(&url)
+        .set("Content-Type", "application/json")
+        .send_string(&body.to_string())
+        .map_err(|e| format!("HTTP error: {}", e))?;
+
+    if response.status() != 200 {
+        return Err(format!("Telegram API returned status {}", response.status()));
+    }
+    
+    info!("Bot command registered with {} available jobs", job_names.len());
+    Ok(())
+}
+
+/// Poll for updates from Telegram
+fn get_updates(token: &str, offset: i64, timeout: u64) -> Result<Vec<TelegramUpdate>, String> {
+    let url = format!(
+        "https://api.telegram.org/bot{}/getUpdates?offset={}&timeout={}",
+        token, offset, timeout
+    );
+
+    let response = ureq::get(&url)
+        .timeout(std::time::Duration::from_secs(timeout + 5))
+        .call()
+        .map_err(|e| format!("HTTP error: {}", e))?;
+
+    if response.status() != 200 {
+        return Err(format!("Telegram API returned status {}", response.status()));
+    }
+
+    let body: TelegramResponse = response
+        .into_json()
+        .map_err(|e| format!("JSON parse error: {}", e))?;
+
+    if !body.ok {
+        return Err("Telegram API returned ok=false".to_string());
+    }
+
+    let updates: Vec<TelegramUpdate> = serde_json::from_value(body.result.unwrap_or(json!([])))
+        .map_err(|e| format!("Failed to parse updates: {}", e))?;
+
+    Ok(updates)
+}
+
+/// Handle incoming Telegram commands
+fn handle_command(
+    command_text: &str,
+    chat_id: i64,
+    config: &AppConfig,
+    scripts_base: &Path,
+) {
+    let parts: Vec<&str> = command_text.split_whitespace().collect();
+    if parts.is_empty() {
+        return;
+    }
+
+    let command = parts[0].trim_start_matches('/');
+    
+    // Handle /run job_name
+    if command == "run" {
+        if parts.len() < 2 {
+            let job_list: Vec<String> = config.jobs.keys().cloned().collect();
+            let msg = format!(
+                "ℹ️ Usage: /run &lt;job_name&gt;\n\nAvailable jobs:\n{}",
+                job_list.iter().map(|j| format!("• <code>{}</code>", j)).collect::<Vec<_>>().join("\n")
+            );
+            let _ = send_telegram(&config.telegram.bot_token, &chat_id.to_string(), &msg);
+            return;
+        }
+        
+        let job_name = parts[1];
+        if let Some(job) = config.jobs.get(job_name) {
+            if !job.enabled {
+                let msg = format!("⚠️ Job <code>{}</code> is disabled in config", job_name);
+                let _ = send_telegram(&config.telegram.bot_token, &chat_id.to_string(), &msg);
+                return;
+            }
+            
+            let msg = format!("▶️ Running job <code>{}</code>...", job_name);
+            let _ = send_telegram(&config.telegram.bot_token, &chat_id.to_string(), &msg);
+            
+            run_job(job_name, job, scripts_base, &config.telegram, true);
+        } else {
+            let job_list: Vec<String> = config.jobs.keys().cloned().collect();
+            let msg = format!(
+                "❌ Job <code>{}</code> not found.\n\nAvailable jobs:\n{}",
+                job_name,
+                job_list.iter().map(|j| format!("• <code>{}</code>", j)).collect::<Vec<_>>().join("\n")
+            );
+            let _ = send_telegram(&config.telegram.bot_token, &chat_id.to_string(), &msg);
+        }
+    }
+}
+
+/// Run the Telegram bot command listener
+fn run_bot_listener(
+    config: AppConfig,
+    scripts_base: PathBuf,
+    stop: Arc<Mutex<bool>>,
+) {
+    let mut offset: i64 = 0;
+    let config = Arc::new(config);
+    
+    info!("Bot listener started");
+
+    loop {
+        if *stop.lock().unwrap() {
+            info!("Bot listener stopping — config reload requested");
+            return;
+        }
+
+        match get_updates(&config.telegram.bot_token, offset, 30) {
+            Ok(updates) => {
+                for update in updates {
+                    offset = update.update_id + 1;
+                    
+                    if let Some(message) = update.message {
+                        if let Some(text) = message.text {
+                            if text.starts_with('/') {
+                                info!("Received command: {} from chat {}", text, message.chat.id);
+                                
+                                let cfg = config.clone();
+                                let base = scripts_base.clone();
+                                let chat_id = message.chat.id;
+                                
+                                thread::spawn(move || {
+                                    handle_command(&text, chat_id, &cfg, &base);
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                error!("Failed to get updates: {}", e);
+                thread::sleep(Duration::from_secs(5));
+            }
+        }
+    }
+}
+
 // ─── Job runner ───────────────────────────────────────────────────────────────
 
 fn run_job(
@@ -79,6 +284,7 @@ fn run_job(
     job: &JobConfig,
     scripts_base: &Path,
     telegram: &TelegramConfig,
+    manual_trigger: bool,
 ) {
     info!("[{}] Running", job_name);
 
@@ -140,6 +346,10 @@ fn run_job(
             match stdout.as_str() {
                 "NOUPDATE" => {
                     info!("[{}] NOUPDATE — no notification sent", job_name);
+                    if manual_trigger {
+                        let msg = format!("💬 <b>{}</b>\nScript had nothing to say", job_name);
+                        notify(telegram, job_name, &msg);
+                    }
                 }
                 "" => {
                     info!("[{}] Empty output — no notification sent", job_name);
@@ -269,7 +479,7 @@ fn run_scheduler(
                 let base_c = scripts_base.clone();
                 let tg_c   = config.telegram.clone();
 
-                thread::spawn(move || run_job(&name_c, &job_c, &base_c, &tg_c));
+                thread::spawn(move || run_job(&name_c, &job_c, &base_c, &tg_c, false));
             }
         }
 
@@ -299,6 +509,9 @@ fn main() {
 
     info!("Config: {}", config_path.display());
 
+    // ── Clear bot commands on first start ─────────────────────────────────────
+    let mut first_start = true;
+
     loop {
         // ── Load config ───────────────────────────────────────────────────────
         let config = match load_config(&config_path) {
@@ -314,14 +527,35 @@ fn main() {
         let scripts_base = get_scripts_base(&config, &config_path);
         info!("Scripts base: {}", scripts_base.display());
 
+        // ── Update bot commands ───────────────────────────────────────────────
+        // Clear all commands on first start, then register new ones
+        if first_start {
+            if let Err(e) = clear_bot_commands(&config.telegram.bot_token) {
+                warn!("Failed to clear bot commands: {}", e);
+            }
+            first_start = false;
+        }
+        
+        let job_names: Vec<String> = config.jobs.keys().cloned().collect();
+        if let Err(e) = set_bot_commands(&config.telegram.bot_token, &job_names) {
+            warn!("Failed to set bot commands: {}", e);
+        }
+
         // ── Start scheduler thread ────────────────────────────────────────────
         let stop         = Arc::new(Mutex::new(false));
         let stop_sched   = Arc::clone(&stop);
+        let stop_bot     = Arc::clone(&stop);
         let config_clone = config.clone();
         let base_clone   = scripts_base.clone();
+        let config_bot   = config.clone();
+        let base_bot     = scripts_base.clone();
 
         let sched_thread = thread::spawn(move || {
             run_scheduler(config_clone, base_clone, stop_sched);
+        });
+
+        let bot_thread = thread::spawn(move || {
+            run_bot_listener(config_bot, base_bot, stop_bot);
         });
 
         // ── Watch config file with inotify ────────────────────────────────────
@@ -360,11 +594,14 @@ fn main() {
             Err(e) => error!("inotify read error: {}", e),
         }
 
-        // Signal the scheduler to stop, then wait for it to exit cleanly.
+        // Signal both threads to stop, then wait for them to exit cleanly.
         *stop.lock().unwrap() = true;
         if let Err(e) = sched_thread.join() {
             error!("Scheduler thread panicked: {:?}", e);
         }
-        info!("Scheduler restarting with new config…");
+        if let Err(e) = bot_thread.join() {
+            error!("Bot listener thread panicked: {:?}", e);
+        }
+        info!("Restarting with new config…");
     }
 }

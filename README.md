@@ -109,23 +109,24 @@ jobs:
 ### Cron expression format
 
 ```
-┌───────────── minute      (0–59)
-│ ┌─────────── hour        (0–23)
-│ │ ┌───────── day of month (1–31)
-│ │ │ ┌─────── month        (1–12)
+┌─────────────── second      (0–59)
+| ┌───────────── minute      (0–59)
+│ │ ┌─────────── hour        (0–23)
+│ │ │ ┌───────── day of month (1–31)
+│ │ │ │ ┌─────── month        (1–12)
 │ │ │ │ ┌───── day of week  (0–7, 0=Sun, 7=Sun)
-│ │ │ │ │
-* * * * *
+| │ │ │ │ │
+* * * * * *
 ```
 
-| Expression      | Meaning                  |
-|-----------------|--------------------------|
-| `* * * * *`     | Every minute             |
-| `*/5 * * * *`   | Every 5 minutes          |
-| `0 * * * *`     | Every hour               |
-| `0 8 * * *`     | Every day at 08:00       |
-| `0 9 * * 1`     | Every Monday at 09:00    |
-| `30 4 1 * *`    | 1st of every month 04:30 |
+| Expression        | Meaning                  |
+|-------------------|--------------------------|
+| `0 * * * * *`     | Every minute             |
+| `0 */5 * * * *`   | Every 5 minutes          |
+| `0 0 * * * *`     | Every hour               |
+| `0 0 8 * * *`     | Every day at 08:00       |
+| `0 0 9 * * 1`     | Every Monday at 09:00    |
+| `0 30 4 1 * *`    | 1st of every month 04:30 |
 
 ---
 
