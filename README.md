@@ -94,15 +94,15 @@ telegram:
 scripts_dir: "/home/user/.config/telegram-cron/scripts"
 
 jobs:
-  job_name:              # Unique name shown in Telegram messages
-    schedule: "* * * * *"  # Standard 5-field cron expression (see below)
+  job_name:                     # Unique name shown in Telegram messages
+    schedule: "* * * * * *"     # Standard 5-field cron expression (see below)
     script:   "path/to/script"  # Relative to scripts_dir, or absolute
-    timeout:  60            # Seconds before the job is considered timed out (default: 60)
-    enabled:  true          # Set false to disable without removing (default: true)
-    args:                   # Optional list of CLI arguments passed to the script
+    timeout:  60                # Seconds before the job is considered timed out (default: 60)
+    enabled:  true              # Set false to disable without removing (default: true)
+    args:                       # Optional list of CLI arguments passed to the script
       - "--flag"
       - "value"
-    env:                    # Optional extra environment variables
+    env:                        # Optional extra environment variables
       KEY: "value"
 ```
 
@@ -149,7 +149,7 @@ Non-zero exit code → send an error notification regardless of stdout.
 ```yaml
 jobs:
   weather_amsterdam:
-    schedule: "0 8 * * *"
+    schedule: "0 0 8 * * *"
     script: "scripts/weather.py"
     args:
       - "--lat"
@@ -194,12 +194,12 @@ Run the same script with different parameters by defining multiple jobs:
 ```yaml
 jobs:
   weather_amsterdam:
-    schedule: "0 8 * * *"
+    schedule: "0 0 8 * * *"
     script: "scripts/weather.py"
     args: ["--lat", "52.37", "--lon", "4.90", "--city", "Amsterdam"]
 
   weather_berlin:
-    schedule: "0 8 * * *"
+    schedule: "0 0 8 * * *"
     script: "scripts/weather.py"
     args: ["--lat", "52.52", "--lon", "13.40", "--city", "Berlin"]
 ```
@@ -237,18 +237,3 @@ telegram-cron /path/to/config.yaml
 # Or using the default path (~/.config/telegram-cron/config.yaml)
 telegram-cron
 ```
-
----
-
-## Dependencies
-
-| Crate         | Purpose                     |
-|---------------|-----------------------------|
-| `serde`       | Config deserialization      |
-| `serde_yaml`  | YAML parsing                |
-| `serde_json`  | Telegram JSON payload       |
-| `cron`        | Cron expression parsing     |
-| `ureq`        | HTTP client (Telegram API)  |
-| `log`         | Logging facade              |
-| `env_logger`  | Log output (journal-ready)  |
-| `chrono`      | Date/time handling          |
