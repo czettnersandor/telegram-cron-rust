@@ -26,7 +26,7 @@ cargo build --release
 
 ```bash
 # Install binary
-install -Dm755 target/release/telegram-cron ~/.local/bin/telegram-cron
+cargo install
 
 # Create config directory
 mkdir -p ~/.config/telegram-cron

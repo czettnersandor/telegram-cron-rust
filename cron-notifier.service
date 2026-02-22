@@ -8,10 +8,10 @@ Wants=network-online.target
 Type=simple
 
 # The binary path after `cargo install` or manual copy to ~/.local/bin/
-ExecStart=%h/.local/bin/telegram-cron %h/.config/telegram-cron/config.yaml
+ExecStart=%h/.cargo/bin/telegram-cron
 
 # Restart automatically on crash (but not on clean exit)
-Restart=on-failure
+Restart=always
 RestartSec=10s
 
 # Give the process time to finish in-flight jobs on shutdown
