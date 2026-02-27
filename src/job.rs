@@ -120,7 +120,11 @@ pub fn run_job(
             output.status.code().unwrap_or(-1),
             detail
         );
-        error!("[{}] Script failed (exit {:?})", job_name, output.status.code());
+        error!(
+            "[{}] Script failed (exit {:?})",
+            job_name,
+            output.status.code()
+        );
         notify(telegram, job_name, &msg);
         return;
     }
@@ -147,10 +151,7 @@ pub fn run_job(
 
 /// Send a Telegram message, logging any error without panicking.
 fn notify(telegram: &TelegramConfig, job_name: &str, msg: &str) {
-    let client = TelegramClient::new(
-        telegram.bot_token.clone(),
-        telegram.chat_id.clone(),
-    );
+    let client = TelegramClient::new(telegram.bot_token.clone(), telegram.chat_id.clone());
 
     if let Err(e) = client.send_message(msg) {
         error!("[{}] Telegram send failed: {}", job_name, e);

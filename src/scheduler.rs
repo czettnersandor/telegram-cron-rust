@@ -35,9 +35,7 @@ fn calculate_next_wake_time(
         };
 
         // Get the last time this job fired
-        let last_fired = job_states
-            .get(name)
-            .and_then(|state| state.last_fired);
+        let last_fired = job_states.get(name).and_then(|state| state.last_fired);
 
         // Find the next scheduled time after the last fire (or now if never fired)
         let window_start = last_fired.unwrap_or(now);
@@ -51,7 +49,7 @@ fn calculate_next_wake_time(
     }
 
     // If we found a next time, return it; otherwise default to 1 minute from now
-    earliest.unwrap_or_else(|| now + chrono::Duration::minutes(1))
+    earliest.unwrap_or_else(|| now + chrono::Duration::minutes(10))
 }
 
 /// Returns true when there is at least one scheduled occurrence in the
